@@ -33,13 +33,13 @@ import javax.net.ssl.X509TrustManager
 import kafka.api._
 import kafka.cluster.{Broker, EndPoint}
 import kafka.log._
-import kafka.security.auth.{Acl, Authorizer, Resource}
+import kafka.security.auth.{Acl, Authorizer => LegacyAuthorizer, Resource}
 import kafka.server._
 import kafka.server.checkpoints.OffsetCheckpointFile
 import Implicits._
-import com.yammer.metrics.Metrics
 import com.yammer.metrics.core.Meter
 import kafka.controller.LeaderIsrAndControllerEpoch
+import kafka.metrics.KafkaYammerMetrics
 import kafka.zk._
 import org.apache.kafka.clients.CommonClientConfigs
 import org.apache.kafka.clients.admin.AlterConfigOp.OpType
@@ -59,7 +59,7 @@ import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer, Deserializer, IntegerSerializer, Serializer}
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.common.utils.Utils._
-import org.apache.kafka.server.authorizer.{Authorizer => JAuthorizer}
+import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.test.{TestSslUtils, TestUtils => JTestUtils}
 import org.apache.zookeeper.KeeperException.SessionExpiredException
 import org.apache.zookeeper.ZooDefs._
@@ -1192,7 +1192,7 @@ object TestUtils extends Logging {
     trustManager
   }
 
-  def waitAndVerifyAcls(expected: Set[AccessControlEntry], authorizer: JAuthorizer, resource: ResourcePattern) = {
+  def waitAndVerifyAcls(expected: Set[AccessControlEntry], authorizer: Authorizer, resource: ResourcePattern) = {
     val newLine = scala.util.Properties.lineSeparator
 
     val filter = new AclBindingFilter(resource.toFilter, AccessControlEntryFilter.ANY)
@@ -1201,7 +1201,8 @@ object TestUtils extends Logging {
         s"but got:${authorizer.acls(filter).asScala.map(_.entry).mkString(newLine + "\t", newLine + "\t", newLine)}", waitTimeMs = JTestUtils.DEFAULT_MAX_WAIT_MS)
   }
 
-  def waitAndVerifyAcls(expected: Set[Acl], authorizer: Authorizer, resource: Resource) = {
+  @deprecated("Use org.apache.kafka.server.authorizer.Authorizer", "Since 2.5")
+  def waitAndVerifyAcls(expected: Set[Acl], authorizer: LegacyAuthorizer, resource: Resource) = {
     val newLine = scala.util.Properties.lineSeparator
 
     waitUntilTrue(() => authorizer.getAcls(resource) == expected,
@@ -1552,6 +1553,22 @@ object TestUtils extends Logging {
     )
   }
 
+  def waitForReplicasAssigned(client: Admin, partition: TopicPartition, brokerIds: Seq[Int]): Unit = {
+    TestUtils.waitUntilTrue(
+      () => {
+        val description = client.describeTopics(Set(partition.topic).asJava).all.get.asScala
+        val replicas = description
+          .values
+          .flatMap(_.partitions.asScala.flatMap(_.replicas.asScala))
+          .map(_.id)
+          .toSeq
+
+        brokerIds == replicas
+      },
+      s"Expected brokers $brokerIds to be the replicas for $partition"
+    )
+  }
+
   /**
    * Capture the console output during the execution of the provided function.
    */
@@ -1609,7 +1626,7 @@ object TestUtils extends Logging {
   }
 
   def meterCount(metricName: String): Long = {
-    Metrics.defaultRegistry.allMetrics.asScala
+    KafkaYammerMetrics.defaultRegistry.allMetrics.asScala
       .filterKeys(_.getMBeanName.endsWith(metricName))
       .values
       .headOption
@@ -1619,8 +1636,8 @@ object TestUtils extends Logging {
   }
 
   def clearYammerMetrics(): Unit = {
-    for (metricName <- Metrics.defaultRegistry.allMetrics.keySet.asScala)
-      Metrics.defaultRegistry.removeMetric(metricName)
+    for (metricName <- KafkaYammerMetrics.defaultRegistry.allMetrics.keySet.asScala)
+      KafkaYammerMetrics.defaultRegistry.removeMetric(metricName)
   }
 
   def stringifyTopicPartitions(partitions: Set[TopicPartition]): String = {
